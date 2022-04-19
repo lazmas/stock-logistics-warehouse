@@ -378,7 +378,7 @@ class TestPotentialQty(TransactionCase):
         self.config.set_param("stock_available_mrp_based_on", "immediately_usable_qty")
 
         # P1 need one P2
-        self.create_simple_bom(p1, p2)
+        bom_p1 = self.create_simple_bom(p1, p2)
         # P2 need one P3
         self.create_simple_bom(p2, p3)
 
@@ -391,3 +391,95 @@ class TestPotentialQty(TransactionCase):
             {p1.id: 3.0, p2.id: 3.0, p3.id: 0.0},
             {p.id: p.potential_qty for p in products},
         )
+        self.assertEqual(
+            {p1.id: 3.0, p2.id: 3.0, p3.id: 3.0},
+            {p.id: p.immediately_usable_qty for p in products},
+        )
+        # Let's stock P1. This is a manufactured product, so by default the available
+        # to promise will be its potential plus its stock.
+        self.create_inventory(p1.id, 2)
+        self.assertEqual(
+            {p1.id: 5.0, p2.id: 3.0, p3.id: 3.0},
+            {p.id: p.immediately_usable_qty for p in products},
+        )
+        # We can override this at BoM level
+        bom_p1.add_potential_exception = True
+        self.product_model.invalidate_cache()
+        self.assertEqual(
+            {p1.id: 2.0, p2.id: 3.0, p3.id: 3.0},
+            {p.id: p.immediately_usable_qty for p in products},
+        )
+
+    def test_product_phantom(self):
+        # Create a BOM product with 2 components
+        # Set stock quantity for the first one == 0.0
+        # Set stock quantity for the second one == 1.0
+        # Create an incoming movement for the first component
+        # The immediately available quantity should stay == 0.0
+        uom_unit = self.env.ref("uom.product_uom_unit")
+        uom_unit.rounding = 1.0
+        product = self.product_model.create(
+            {
+                "name": "Test product with BOM",
+                "type": "product",
+                "uom_id": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+        bom = self.bom_model.create(
+            {
+                "product_tmpl_id": product.product_tmpl_id.id,
+                "product_id": product.id,
+                "type": "phantom",
+            }
+        )
+
+        bom_product = self.product_model.create(
+            {
+                "name": "BOM product",
+                "type": "product",
+                "uom_id": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+
+        self.bom_line_model.create(
+            {
+                "bom_id": bom.id,
+                "product_id": bom_product.id,
+                "product_qty": 1,
+                "product_uom_id": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+
+        bom_product_2 = self.product_model.create(
+            {
+                "name": "BOM product 2",
+                "type": "product",
+                "uom_id": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+
+        self.bom_line_model.create(
+            {
+                "bom_id": bom.id,
+                "product_id": bom_product_2.id,
+                "product_qty": 1,
+                "product_uom_id": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+        self.create_inventory(bom_product_2.id, 1)
+
+        move_in = self.env["stock.move"].create(
+            {
+                "name": bom_product.name,
+                "location_id": self.env.ref("stock.stock_location_suppliers").id,
+                "location_dest_id": self.env.ref("stock.stock_location_stock").id,
+                "product_id": bom_product.id,
+                "product_uom_qty": 1.0,
+                "product_uom": self.env.ref("uom.product_uom_unit").id,
+            }
+        )
+
+        move_in._action_confirm()
+        product.invalidate_cache()
+
+        self.assertEqual(product.immediately_usable_qty, 0.0)
